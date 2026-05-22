@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>RelayTalk</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a2e;color:#fff;height:100vh}
+.container{max-width:1200px;margin:0 auto;padding:16px;height:100vh;display:flex;flex-direction:column}
+.header{display:flex;justify-content:space-between;align-items:center;padding:12px 0;flex-shrink:0}
+.header h1{font-size:18px;font-weight:600}
+#netStats{font-size:13px;color:#aaa;font-family:monospace}
+#bar{text-align:center;padding:6px;font-size:13px;border-radius:8px;margin-bottom:4px;flex-shrink:0}
+#bar.waiting{background:#2a2a3e;color:#aaa}
+#bar.ok{background:#1a3a2e;color:#44ff44}
+#bar.busy{background:#3a3a5e;color:#ffcc00}
+#bar.err{background:#3a1a2e;color:#ff6666}
+#err{color:#e94560;font-size:12px;text-align:center;padding:4px;display:none}
+#aDbg{font-size:11px;color:#888;text-align:center;flex-shrink:0;line-height:1.5}
+.grid{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:12px;min-height:0;padding:8px 0}
+.box{position:relative;background:#16213e;border-radius:12px;overflow:hidden}
+.box video{width:100%;height:100%;object-fit:cover;display:block;background:#111827}
+.box .lbl{position:absolute;bottom:12px;left:12px;background:rgba(0,0,0,.6);padding:4px 10px;border-radius:6px;font-size:13px}
+.box .ph{color:#555;font-size:14px;padding:20px;text-align:center;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}
+#localVideo{transform:scaleX(-1)}
+.controls{display:flex;justify-content:center;gap:16px;padding:16px 0;flex-shrink:0}
+.controls button{width:48px;height:48px;border-radius:50%;border:none;cursor:pointer;font-size:20px;background:#16213e;color:#fff}
+.controls button:hover{background:#0f3460}
+.controls button.off,.controls button.hangup:hover{background:#e94560}
+.controls button.hangup{background:#e94560;width:56px;height:56px}
+@media(max-width:600px){.grid{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header"><h1>RelayTalk</h1><span id="netStats">⬆ -- ⬇ -- KB/s</span></div>
+<div id="bar" class="waiting">启动中...</div>
+<div id="err"></div>
+<div id="aDbg"></div>
+<div class="grid">
+<div class="box"><video id="localVideo" autoplay muted playsinline></video><div class="lbl">我</div></div>
+<div class="box">
+<video id="remoteVideo" autoplay playsinline></video>
+<div class="ph" id="ph">等待对方加入...</div>
+<div class="lbl">对方</div>
+</div>
+</div>
+<div class="controls">
+<button id="btnMic">🎤</button>
+<button id="btnCam">📹</button>
+<button class="hangup" id="btnHangup">📞</button>
+</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const LV=$('localVideo'), RV=$('remoteVideo'), PH=$('ph');
+let log=m=>console.log('RelayTalk:',m);
+let bar=(t,txt)=>{$('bar').className=t;$('bar').textContent=txt};
+let err=m=>{$('err').style.display='block';$('err').textContent='❌ '+m};
+
+let ws, localStream, remoteStream, pc=null, remoteId=null, havePeer=false;
+let mediaPromise=null, pendingCandidates=[];
+let makingOffer=false, connected=false;
+let statsTimer=null, lastSent=0, lastRecv=0, appConfig=null, ICE_CONFIG=null;
+
+async function loadConfig(){
+  if(appConfig) return appConfig;
+  const res=await fetch('/config.json',{cache:'no-store'});
+  if(!res.ok) throw new Error('config load failed: '+res.status);
+  appConfig=await res.json();
+  ICE_CONFIG=appConfig.iceConfig;
+  return appConfig;
+}
+
+async function ensureMedia(){
+  if(localStream) return localStream;
+  if(mediaPromise) return mediaPromise;
+  mediaPromise=(async()=>{
+    bar('busy','获取摄像头和麦克风...');
+    try{
+      localStream=await navigator.mediaDevices.getUserMedia({
+        video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:20,max:24}},
+        audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
+      });
+      for(const track of localStream.getVideoTracks()){
+        try{track.contentHint='detail'}catch(e){}
+      }
+      LV.srcObject=localStream;
+      bar('waiting','已就绪');
+      updateDebug();
+      return localStream;
+    }catch(e){
+      mediaPromise=null;
+      err('摄像头/麦克风不可用: '+e.message);
+      throw e;
+    }
+  })();
+  return mediaPromise;
+}
+
+function createPC(){
+  closePC();
+  if(!ICE_CONFIG) throw new Error('ICE_CONFIG 未加载');
+  remoteStream=new MediaStream();
+  RV.srcObject=remoteStream;
+  pc=new RTCPeerConnection(ICE_CONFIG);
+
+  pc.onicecandidate=e=>{
+    if(e.candidate && ws && ws.readyState===WebSocket.OPEN && remoteId){
+      sendSignal('wr-can', e.candidate);
+    }
+  };
+
+  pc.ontrack=e=>{
+    PH.style.display='none';
+    for(const track of e.streams[0].getTracks()){
+      if(!remoteStream.getTracks().some(t=>t.id===track.id)) remoteStream.addTrack(track);
+    }
+    RV.play().catch(ex=>log('remote play blocked: '+ex.message));
+    updateDebug();
+  };
+
+  pc.onconnectionstatechange=()=>{
+    const s=pc.connectionState;
+    connected=(s==='connected'||s==='completed');
+    if(connected){bar('ok','已连接');startStats()}
+    if(s==='failed'){bar('err','WebRTC连接失败');retrySoon()}
+    if(s==='disconnected'){bar('busy','连接中断，重试中');retrySoon()}
+    updateDebug();
+  };
+  pc.oniceconnectionstatechange=()=>updateDebug();
+  pc.onicegatheringstatechange=()=>updateDebug();
+  pc.onsignalingstatechange=()=>updateDebug();
+
+  for(const track of localStream.getTracks()){
+    const sender=pc.addTrack(track, localStream);
+    tuneSender(sender, track);
+  }
+  updateDebug();
+}
+
+function tuneSender(sender, track){
+  try{
+    const params=sender.getParameters();
+    if(!params.encodings || !params.encodings.length) params.encodings=[{}];
+    if(track.kind==='video'){
+      params.encodings[0].maxBitrate=2500000; // 2.5 Mbps, clearer 720p over TURN TCP
+      params.encodings[0].scaleResolutionDownBy=1;
+      params.degradationPreference='maintain-resolution';
+    }else if(track.kind==='audio'){
+      params.encodings[0].maxBitrate=64000;
+    }
+    sender.setParameters(params).catch(e=>log('setParameters failed: '+e.message));
+  }catch(e){log('tuneSender skipped: '+e.message)}
+}
+
+function closePC(){
+  stopStats();
+  if(pc){try{pc.close()}catch(e){}}
+  pc=null; connected=false; makingOffer=false; pendingCandidates=[];
+  if(remoteStream){for(const t of remoteStream.getTracks()) t.stop()}
+  remoteStream=null; RV.srcObject=null; PH.style.display='block';
+  updateDebug();
+}
+
+function sendSignal(type,data){
+  if(ws && ws.readyState===WebSocket.OPEN && remoteId){
+    ws.send(JSON.stringify({to:remoteId,type,data}));
+  }
+}
+
+async function startCall(){
+  if(pc || !remoteId) return;
+  await ensureMedia();
+  createPC();
+  try{
+    makingOffer=true;
+    await pc.setLocalDescription(await pc.createOffer());
+    sendSignal('wr-offer', pc.localDescription);
+    bar('busy','offer sent');
+    updateDebug();
+  }catch(e){err('创建 offer 失败: '+e.message);closePC()}
+  finally{makingOffer=false}
+}
+
+async function handleOffer(from,sdp){
+  remoteId=from;
+  await ensureMedia();
+  if(!pc) createPC();
+  try{
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    await flushPendingCandidates();
+    await pc.setLocalDescription(await pc.createAnswer());
+    sendSignal('wr-answer', pc.localDescription);
+    bar('busy','answer sent');
+    updateDebug();
+  }catch(e){err('处理 offer 失败: '+e.message);closePC()}
+}
+
+async function handleAnswer(sdp){
+  if(!pc) return;
+  try{
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    await flushPendingCandidates();
+    updateDebug();
+  }catch(e){err('处理 answer 失败: '+e.message)}
+}
+
+async function handleCandidate(c){
+  const candidate=new RTCIceCandidate(c);
+  if(!pc || !pc.remoteDescription){pendingCandidates.push(candidate);return}
+  try{await pc.addIceCandidate(candidate)}catch(e){log('ICE err: '+e.message)}
+}
+
+async function flushPendingCandidates(){
+  if(!pc || !pc.remoteDescription || !pendingCandidates.length) return;
+  const queue=pendingCandidates.splice(0);
+  for(const c of queue){try{await pc.addIceCandidate(c)}catch(e){log('queued ICE err: '+e.message)}}
+}
+
+function retrySoon(){
+  if(!remoteId) return;
+  setTimeout(()=>{if(remoteId && !pc) startCall()},3000);
+}
+
+function connect(){
+  bar('busy','连接服务器...');
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);
+  ws.onopen=()=>{log('WS OK');ensureMedia().catch(()=>{})};
+  ws.onclose=()=>{closePC();bar('err','服务器断开');setTimeout(connect,3000)};
+  ws.onmessage=async e=>{
+    try{
+      const m=JSON.parse(e.data);
+      switch(m.type){
+        case 'init':
+          havePeer=m.peers.length>0;
+          if(havePeer){remoteId=m.peers[0];bar('ok','对方已在线');startCall()}
+          else bar('waiting','等待对方加入...');
+          break;
+        case 'peer-joined':
+          if(!havePeer){havePeer=true;remoteId=m.peerId;bar('ok','对方已加入，等待连接...')}
+          break;
+        case 'wr-offer': await handleOffer(m.from,m.data); break;
+        case 'wr-answer': await handleAnswer(m.data); break;
+        case 'wr-can': await handleCandidate(m.data); break;
+        case 'peer-left': case 'hangup':
+          havePeer=false;remoteId=null;closePC();bar('waiting',m.type==='hangup'?'对方已挂断':'等待对方加入...');
+          break;
+        case 'room-full': err('聊天室已满（最多2人）');bar('err','聊天室已满');break;
+      }
+    }catch(ex){err('消息错误: '+ex.message)}
+  };
+}
+
+function startStats(){
+  if(statsTimer || !pc) return;
+  statsTimer=setInterval(async()=>{
+    if(!pc) return;
+    const stats=await pc.getStats();
+    let sent=0, recv=0;
+    stats.forEach(r=>{
+      if(r.type==='outbound-rtp' && !r.isRemote) sent+=r.bytesSent||0;
+      if(r.type==='inbound-rtp' && !r.isRemote) recv+=r.bytesReceived||0;
+    });
+    $('netStats').textContent=`⬆ ${((sent-lastSent)/1024).toFixed(1)} ⬇ ${((recv-lastRecv)/1024).toFixed(1)} KB/s`;
+    lastSent=sent; lastRecv=recv;
+    updateDebug();
+  },1000);
+}
+function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=null}lastSent=0;lastRecv=0;$('netStats').textContent='⬆ -- ⬇ -- KB/s'}
+
+function updateDebug(){
+  const info=$('aDbg');
+  if(!info) return;
+  info.textContent='AV:'+(connected?'✅':'⏳')+
+    ' | PC:'+(pc?pc.connectionState:'null')+
+    ' | ICE:'+(pc?pc.iceConnectionState:'-')+
+    ' | SIG:'+(pc?pc.signalingState:'-');
+}
+
+let micOn=true, camOn=true;
+$('btnMic').onclick=function(){micOn=!micOn;if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=micOn);this.className=micOn?'':'off';this.textContent=micOn?'🎤':'🔇'};
+$('btnCam').onclick=function(){camOn=!camOn;if(localStream)localStream.getVideoTracks().forEach(t=>t.enabled=camOn);this.className=camOn?'':'off';this.textContent=camOn?'📹':'🚫'};
+$('btnHangup').onclick=function(){if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'hangup'}));remoteId=null;havePeer=false;closePC();bar('waiting','已挂断')};
+
+document.addEventListener('click',()=>{if(RV.srcObject)RV.play().catch(()=>{})},{once:false});
+async function init(){
+  try{
+    await loadConfig();
+    connect();
+  }catch(e){
+    err('配置加载失败: '+e.message);
+    bar('err','配置加载失败');
+  }
+}
+init();
+</script>
+</body>
+</html>

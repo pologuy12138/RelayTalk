@@ -1,0 +1,30 @@
+# ============================================================
+# App-only deployment: Node.js service without bundled Nginx/SSL.
+# Suitable for a NAS LAN deployment, or an existing reverse proxy.
+#
+# 使用方式：
+#   docker compose -f docker-compose.app-only.yml up -d
+#
+# 访问：http://你的NAS-IP:3050
+#
+# 如需外网 HTTPS 访问，建议在 NAS 的反代管理后台配置：
+#   上游地址 → http://127.0.0.1:3050
+#   开启 WebSocket 支持
+# ============================================================
+
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: relaytalk-app
+    restart: unless-stopped
+    environment:
+      PORT: "3050"
+      MAX_PEERS: "2"
+      TURN_URLS: "turn:your-turn-domain.example.com:3478?transport=tcp"
+      TURN_USERNAME: "replace-me"
+      TURN_CREDENTIAL: "replace-me"
+      ICE_TRANSPORT_POLICY: "relay"
+    ports:
+      - "3050:3050"             # HTTP（内网用，或自行套 HTTPS 反代）
