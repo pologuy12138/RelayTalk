@@ -14,14 +14,15 @@ const TURN_USERNAME = process.env.TURN_USERNAME || 'replace-me';
 const TURN_CREDENTIAL = process.env.TURN_CREDENTIAL || 'replace-me';
 const ICE_TRANSPORT_POLICY = process.env.ICE_TRANSPORT_POLICY || 'relay';
 const VIDEO_CONFIG = {
-    width: Number(process.env.VIDEO_WIDTH || 1280),
-    height: Number(process.env.VIDEO_HEIGHT || 720),
-    frameRate: Number(process.env.VIDEO_FPS || 18),
-    maxBitrate: Number(process.env.VIDEO_MAX_BITRATE || 3000000),
-    startBitrate: Number(process.env.VIDEO_START_BITRATE || 1800000),
-    minBitrate: Number(process.env.VIDEO_MIN_BITRATE || 800000),
+    width: Number(process.env.VIDEO_WIDTH || 1920),
+    height: Number(process.env.VIDEO_HEIGHT || 1080),
+    frameRate: Number(process.env.VIDEO_FPS || 24),
+    maxBitrate: Number(process.env.VIDEO_MAX_BITRATE || 8000000),
+    startBitrate: Number(process.env.VIDEO_START_BITRATE || 5000000),
+    minBitrate: Number(process.env.VIDEO_MIN_BITRATE || 3000000),
     degradationPreference: process.env.VIDEO_DEGRADATION || 'maintain-resolution',
     preferCodec: process.env.VIDEO_PREFER_CODEC || 'H264',
+    strict: process.env.VIDEO_STRICT !== 'false',
 };
 const AUDIO_MAX_BITRATE = Number(process.env.AUDIO_MAX_BITRATE || 64000);
 const MIME = {

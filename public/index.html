@@ -65,7 +65,7 @@ let makingOffer=false, connected=false;
 let statsTimer=null, lastSent=0, lastRecv=0, appConfig=null, ICE_CONFIG=null;
 let avMetrics='';
 let lastVideoFrames={out:null,in:null};
-const DEFAULT_VIDEO={width:1280,height:720,frameRate:18,maxBitrate:3000000,startBitrate:1800000,minBitrate:800000,degradationPreference:'maintain-resolution',preferCodec:'H264'};
+const DEFAULT_VIDEO={width:1920,height:1080,frameRate:24,maxBitrate:8000000,startBitrate:5000000,minBitrate:3000000,degradationPreference:'maintain-resolution',preferCodec:'H264',strict:true};
 const DEFAULT_AUDIO={maxBitrate:64000};
 
 async function loadConfig(){
@@ -85,6 +85,22 @@ function audioConfig(){
   return Object.assign({},DEFAULT_AUDIO,(appConfig&&appConfig.audio)||{});
 }
 
+function mediaVideoConstraints(vc){
+  if(vc.strict){
+    return {
+      width:{exact:vc.width},
+      height:{exact:vc.height},
+      frameRate:{min:vc.frameRate,ideal:vc.frameRate,max:vc.frameRate},
+      resizeMode:'none'
+    };
+  }
+  return {
+    width:{ideal:vc.width},
+    height:{ideal:vc.height},
+    frameRate:{ideal:vc.frameRate}
+  };
+}
+
 async function ensureMedia(){
   if(localStream) return localStream;
   if(mediaPromise) return mediaPromise;
@@ -93,7 +109,7 @@ async function ensureMedia(){
     try{
       const vc=videoConfig();
       localStream=await navigator.mediaDevices.getUserMedia({
-        video:{width:{ideal:vc.width},height:{ideal:vc.height},frameRate:{ideal:vc.frameRate}},
+        video:mediaVideoConstraints(vc),
         audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
       });
       for(const track of localStream.getVideoTracks()){
@@ -105,7 +121,12 @@ async function ensureMedia(){
       return localStream;
     }catch(e){
       mediaPromise=null;
-      err('摄像头/麦克风不可用: '+e.message);
+      if(e.name==='OverconstrainedError'){
+        const vc=videoConfig();
+        err(`设备不支持固定 ${vc.width}x${vc.height}@${vc.frameRate}fps: ${e.constraint||e.message}`);
+      }else{
+        err('摄像头/麦克风不可用: '+e.message);
+      }
       throw e;
     }
   })();
