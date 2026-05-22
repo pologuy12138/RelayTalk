@@ -13,6 +13,17 @@ const TURN_URLS = (process.env.TURN_URLS || 'turn:your-turn-domain.example.com:3
 const TURN_USERNAME = process.env.TURN_USERNAME || 'replace-me';
 const TURN_CREDENTIAL = process.env.TURN_CREDENTIAL || 'replace-me';
 const ICE_TRANSPORT_POLICY = process.env.ICE_TRANSPORT_POLICY || 'relay';
+const VIDEO_CONFIG = {
+    width: Number(process.env.VIDEO_WIDTH || 1280),
+    height: Number(process.env.VIDEO_HEIGHT || 720),
+    frameRate: Number(process.env.VIDEO_FPS || 18),
+    maxBitrate: Number(process.env.VIDEO_MAX_BITRATE || 3000000),
+    startBitrate: Number(process.env.VIDEO_START_BITRATE || 1800000),
+    minBitrate: Number(process.env.VIDEO_MIN_BITRATE || 800000),
+    degradationPreference: process.env.VIDEO_DEGRADATION || 'maintain-resolution',
+    preferCodec: process.env.VIDEO_PREFER_CODEC || 'H264',
+};
+const AUDIO_MAX_BITRATE = Number(process.env.AUDIO_MAX_BITRATE || 64000);
 const MIME = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'application/javascript',
@@ -35,6 +46,10 @@ const server = http.createServer((req, res) => {
                     credential: TURN_CREDENTIAL,
                 }],
                 iceTransportPolicy: ICE_TRANSPORT_POLICY,
+            },
+            video: VIDEO_CONFIG,
+            audio: {
+                maxBitrate: AUDIO_MAX_BITRATE,
             },
         }));
         return;
@@ -119,4 +134,5 @@ wss.on('connection', (ws) => {
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`RelayTalk running on :${PORT}, room: ${ROOM}, max: ${MAX_PEERS}`);
     console.log(`TURN URLs: ${TURN_URLS.join(', ')}`);
+    console.log(`Video: ${VIDEO_CONFIG.width}x${VIDEO_CONFIG.height}@${VIDEO_CONFIG.frameRate}fps, ${Math.round(VIDEO_CONFIG.maxBitrate / 1000)}kbps max`);
 });

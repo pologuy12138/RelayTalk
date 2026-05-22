@@ -55,6 +55,14 @@ environment:
   TURN_USERNAME: "your-turn-user"
   TURN_CREDENTIAL: "your-turn-password"
   ICE_TRANSPORT_POLICY: "relay"
+  VIDEO_WIDTH: "1280"
+  VIDEO_HEIGHT: "720"
+  VIDEO_FPS: "18"
+  VIDEO_MAX_BITRATE: "3000000"
+  VIDEO_START_BITRATE: "1800000"
+  VIDEO_MIN_BITRATE: "800000"
+  VIDEO_DEGRADATION: "maintain-resolution"
+  VIDEO_PREFER_CODEC: "H264"
 ```
 
 启动：
@@ -107,6 +115,14 @@ TURN_URLS='turn:your-domain.example.com:3478?transport=tcp' \
 TURN_USERNAME='your-turn-user' \
 TURN_CREDENTIAL='your-turn-password' \
 ICE_TRANSPORT_POLICY='relay' \
+VIDEO_WIDTH=1280 \
+VIDEO_HEIGHT=720 \
+VIDEO_FPS=18 \
+VIDEO_MAX_BITRATE=3000000 \
+VIDEO_START_BITRATE=1800000 \
+VIDEO_MIN_BITRATE=800000 \
+VIDEO_DEGRADATION=maintain-resolution \
+VIDEO_PREFER_CODEC=H264 \
 npm start
 ```
 
@@ -147,15 +163,68 @@ ICE_TRANSPORT_POLICY=relay
 | `TURN_USERNAME` | 占位值 | TURN 用户名 |
 | `TURN_CREDENTIAL` | 占位值 | TURN 密码 |
 | `ICE_TRANSPORT_POLICY` | `relay` | `relay` 强制走 TURN；`all` 允许浏览器尝试直连 |
+| `VIDEO_WIDTH` | `1280` | 摄像头采集目标宽度 |
+| `VIDEO_HEIGHT` | `720` | 摄像头采集目标高度 |
+| `VIDEO_FPS` | `18` | 摄像头采集和发送目标帧率 |
+| `VIDEO_MAX_BITRATE` | `3000000` | 视频最大发送码率，单位 bps |
+| `VIDEO_START_BITRATE` | `1800000` | Chrome 等浏览器可参考的视频起步码率，单位 bps |
+| `VIDEO_MIN_BITRATE` | `800000` | Chrome 等浏览器可参考的视频最低码率，单位 bps |
+| `VIDEO_DEGRADATION` | `maintain-resolution` | 拥塞时优先保持分辨率，还是优先保持帧率 |
+| `VIDEO_PREFER_CODEC` | `H264` | 优先使用的视频编码，手机硬编通常对 H264 更友好 |
 
 视频质量参数在 `public/index.html` 里：
 
 ```javascript
-video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:20,max:24}}
-params.encodings[0].maxBitrate=2500000;
+video:{width:{ideal:vc.width},height:{ideal:vc.height},frameRate:{ideal:vc.frameRate,max:vc.frameRate}}
+params.encodings[0].maxBitrate=vc.maxBitrate;
 ```
 
-如果带宽足够，可以把 `maxBitrate` 提高到 `3500000` 或更高；如果画面卡顿，就降低码率或帧率。
+如果带宽足够，可以把 `VIDEO_MAX_BITRATE` 提高到 `3500000` 或更高；如果画面卡顿，就降低码率或帧率。
+
+## 画质与卡顿说明
+
+RelayTalk 默认强制走 TURN TCP。这个方案的优点是连通性通常更稳，缺点是视频链路会更容易触发 WebRTC 拥塞控制。
+
+WebRTC 会根据网络状态自动调节码率、帧率和清晰度。即使设置了较高的 `VIDEO_MAX_BITRATE`，浏览器也可能在以下情况主动降码率：
+
+- TURN TCP 链路延迟或抖动较高
+- 上下行带宽不足
+- 手机 CPU / 硬件编码能力不足
+- TCP 队头阻塞导致短时间积压
+
+页面底部调试行会显示类似：
+
+```text
+TX:1280x720@18 | RX:1280x720@18 | Q:bandwidth
+```
+
+`Q:bandwidth` 表示浏览器认为主要受网络限制，`Q:cpu` 表示主要受设备性能限制，`Q:none` 表示当前没有明显限制。
+
+如果要优先清晰，可以尝试：
+
+```yaml
+VIDEO_WIDTH: "1280"
+VIDEO_HEIGHT: "720"
+VIDEO_FPS: "15"
+VIDEO_MAX_BITRATE: "3500000"
+VIDEO_START_BITRATE: "2200000"
+VIDEO_MIN_BITRATE: "1200000"
+VIDEO_DEGRADATION: "maintain-resolution"
+VIDEO_PREFER_CODEC: "H264"
+```
+
+如果要优先流畅，可以尝试：
+
+```yaml
+VIDEO_WIDTH: "960"
+VIDEO_HEIGHT: "540"
+VIDEO_FPS: "18"
+VIDEO_MAX_BITRATE: "1800000"
+VIDEO_START_BITRATE: "1000000"
+VIDEO_MIN_BITRATE: "500000"
+VIDEO_DEGRADATION: "maintain-framerate"
+VIDEO_PREFER_CODEC: "H264"
+```
 
 ## 群晖 NAS 反代注意事项
 
@@ -228,13 +297,15 @@ wr-can
 
 ### 视频能用，但画质低
 
-提高 `public/index.html` 中的视频码率：
+提高视频码率环境变量：
 
-```javascript
-params.encodings[0].maxBitrate=3500000;
+```yaml
+VIDEO_MAX_BITRATE: "3500000"
+VIDEO_START_BITRATE: "2200000"
+VIDEO_MIN_BITRATE: "1200000"
 ```
 
-也可以把采集目标从 720p 调到 1080p，但 TURN TCP 会更吃带宽，跨网络使用时建议逐步提高。
+也可以把采集目标从 720p 调到 1080p，但 TURN TCP 会更吃带宽，跨网络使用时建议逐步提高。若页面底部出现 `Q:bandwidth`，继续提高码率通常只会更卡；此时应降低帧率或分辨率，或者改用可用的 TURN UDP / 直连路径。
 
 ## 项目结构
 

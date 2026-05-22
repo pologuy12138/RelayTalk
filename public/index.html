@@ -63,6 +63,9 @@ let ws, localStream, remoteStream, pc=null, remoteId=null, havePeer=false;
 let mediaPromise=null, pendingCandidates=[];
 let makingOffer=false, connected=false;
 let statsTimer=null, lastSent=0, lastRecv=0, appConfig=null, ICE_CONFIG=null;
+let avMetrics='';
+const DEFAULT_VIDEO={width:1280,height:720,frameRate:18,maxBitrate:3000000,startBitrate:1800000,minBitrate:800000,degradationPreference:'maintain-resolution',preferCodec:'H264'};
+const DEFAULT_AUDIO={maxBitrate:64000};
 
 async function loadConfig(){
   if(appConfig) return appConfig;
@@ -73,14 +76,23 @@ async function loadConfig(){
   return appConfig;
 }
 
+function videoConfig(){
+  return Object.assign({},DEFAULT_VIDEO,(appConfig&&appConfig.video)||{});
+}
+
+function audioConfig(){
+  return Object.assign({},DEFAULT_AUDIO,(appConfig&&appConfig.audio)||{});
+}
+
 async function ensureMedia(){
   if(localStream) return localStream;
   if(mediaPromise) return mediaPromise;
   mediaPromise=(async()=>{
     bar('busy','获取摄像头和麦克风...');
     try{
+      const vc=videoConfig();
       localStream=await navigator.mediaDevices.getUserMedia({
-        video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:20,max:24}},
+        video:{width:{ideal:vc.width},height:{ideal:vc.height},frameRate:{ideal:vc.frameRate,max:vc.frameRate}},
         audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
       });
       for(const track of localStream.getVideoTracks()){
@@ -135,9 +147,27 @@ function createPC(){
 
   for(const track of localStream.getTracks()){
     const sender=pc.addTrack(track, localStream);
+    preferCodec(sender, track);
     tuneSender(sender, track);
   }
   updateDebug();
+}
+
+function preferCodec(sender, track){
+  if(track.kind!=='video') return;
+  const vc=videoConfig();
+  if(!vc.preferCodec || typeof RTCRtpSender==='undefined' || !RTCRtpSender.getCapabilities) return;
+  try{
+    const transceiver=pc.getTransceivers().find(t=>t.sender===sender);
+    if(!transceiver || !transceiver.setCodecPreferences) return;
+    const caps=RTCRtpSender.getCapabilities('video');
+    if(!caps || !caps.codecs) return;
+    const preferred=String(vc.preferCodec).toLowerCase();
+    const first=caps.codecs.filter(c=>c.mimeType&&c.mimeType.toLowerCase()===`video/${preferred}`);
+    if(!first.length) return;
+    const rest=caps.codecs.filter(c=>!(c.mimeType&&c.mimeType.toLowerCase()===`video/${preferred}`));
+    transceiver.setCodecPreferences(first.concat(rest));
+  }catch(e){log('codec preference skipped: '+e.message)}
 }
 
 function tuneSender(sender, track){
@@ -145,14 +175,67 @@ function tuneSender(sender, track){
     const params=sender.getParameters();
     if(!params.encodings || !params.encodings.length) params.encodings=[{}];
     if(track.kind==='video'){
-      params.encodings[0].maxBitrate=2500000; // 2.5 Mbps, clearer 720p over TURN TCP
+      const vc=videoConfig();
+      params.encodings[0].maxBitrate=vc.maxBitrate;
+      params.encodings[0].maxFramerate=vc.frameRate;
       params.encodings[0].scaleResolutionDownBy=1;
-      params.degradationPreference='maintain-resolution';
+      params.degradationPreference=vc.degradationPreference;
     }else if(track.kind==='audio'){
-      params.encodings[0].maxBitrate=64000;
+      params.encodings[0].maxBitrate=audioConfig().maxBitrate;
     }
     sender.setParameters(params).catch(e=>log('setParameters failed: '+e.message));
   }catch(e){log('tuneSender skipped: '+e.message)}
+}
+
+function tuneDescription(desc){
+  if(!desc || !desc.sdp) return desc;
+  const vc=videoConfig();
+  let sdp=desc.sdp;
+  sdp=setMediaBandwidth(sdp,'video',Math.round(vc.maxBitrate/1000));
+  sdp=setVideoCodecBitrates(sdp,vc);
+  return {type:desc.type,sdp};
+}
+
+function setMediaBandwidth(sdp, media, maxKbps){
+  const lines=sdp.split('\r\n');
+  const mLine=lines.findIndex(l=>l.startsWith(`m=${media}`));
+  if(mLine<0) return sdp;
+  for(let i=mLine+1;i<lines.length && !lines[i].startsWith('m=');){
+    if(lines[i].startsWith('b=AS:')||lines[i].startsWith('b=TIAS:')) lines.splice(i,1);
+    else i++;
+  }
+  let insertAt=mLine+1;
+  for(let i=mLine+1;i<lines.length && !lines[i].startsWith('m=');i++){
+    if(lines[i].startsWith('c=')) insertAt=i+1;
+  }
+  lines.splice(insertAt,0,`b=AS:${maxKbps}`,`b=TIAS:${maxKbps*1000}`);
+  return lines.join('\r\n');
+}
+
+function setVideoCodecBitrates(sdp, vc){
+  const lines=sdp.split('\r\n');
+  const min=Math.round(vc.minBitrate/1000);
+  const start=Math.round(vc.startBitrate/1000);
+  const max=Math.round(vc.maxBitrate/1000);
+  const pts=[];
+  lines.forEach(line=>{
+    const m=line.match(/^a=rtpmap:(\d+) (VP8|VP9|H264|AV1)\//i);
+    if(m) pts.push(m[1]);
+  });
+  for(const pt of pts){
+    const fmtpPrefix=`a=fmtp:${pt} `;
+    const params=[`x-google-min-bitrate=${min}`,`x-google-start-bitrate=${start}`,`x-google-max-bitrate=${max}`];
+    const fmtpIndex=lines.findIndex(l=>l.startsWith(fmtpPrefix));
+    if(fmtpIndex>=0){
+      const existing=lines[fmtpIndex].slice(fmtpPrefix.length).split(';').map(p=>p.trim()).filter(Boolean)
+        .filter(p=>!/^x-google-(min|start|max)-bitrate=/i.test(p));
+      lines[fmtpIndex]=fmtpPrefix+existing.concat(params).join(';');
+    }else{
+      const rtpIndex=lines.findIndex(l=>l.startsWith(`a=rtpmap:${pt} `));
+      if(rtpIndex>=0) lines.splice(rtpIndex+1,0,fmtpPrefix+params.join(';'));
+    }
+  }
+  return lines.join('\r\n');
 }
 
 function closePC(){
@@ -176,7 +259,7 @@ async function startCall(){
   createPC();
   try{
     makingOffer=true;
-    await pc.setLocalDescription(await pc.createOffer());
+    await pc.setLocalDescription(tuneDescription(await pc.createOffer()));
     sendSignal('wr-offer', pc.localDescription);
     bar('busy','offer sent');
     updateDebug();
@@ -191,7 +274,7 @@ async function handleOffer(from,sdp){
   try{
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
     await flushPendingCandidates();
-    await pc.setLocalDescription(await pc.createAnswer());
+    await pc.setLocalDescription(tuneDescription(await pc.createAnswer()));
     sendSignal('wr-answer', pc.localDescription);
     bar('busy','answer sent');
     updateDebug();
@@ -259,16 +342,27 @@ function startStats(){
     if(!pc) return;
     const stats=await pc.getStats();
     let sent=0, recv=0;
+    let outVideo='', inVideo='', quality='';
     stats.forEach(r=>{
       if(r.type==='outbound-rtp' && !r.isRemote) sent+=r.bytesSent||0;
       if(r.type==='inbound-rtp' && !r.isRemote) recv+=r.bytesReceived||0;
+      if(r.type==='outbound-rtp' && !r.isRemote && (r.kind==='video'||r.mediaType==='video')){
+        const w=r.frameWidth||0, h=r.frameHeight||0, fps=Math.round(r.framesPerSecond||0);
+        if(w&&h) outVideo=`TX:${w}x${h}${fps?`@${fps}`:''}`;
+        if(r.qualityLimitationReason) quality=`Q:${r.qualityLimitationReason}`;
+      }
+      if(r.type==='inbound-rtp' && !r.isRemote && (r.kind==='video'||r.mediaType==='video')){
+        const w=r.frameWidth||0, h=r.frameHeight||0, fps=Math.round(r.framesPerSecond||0);
+        if(w&&h) inVideo=`RX:${w}x${h}${fps?`@${fps}`:''}`;
+      }
     });
     $('netStats').textContent=`⬆ ${((sent-lastSent)/1024).toFixed(1)} ⬇ ${((recv-lastRecv)/1024).toFixed(1)} KB/s`;
     lastSent=sent; lastRecv=recv;
+    avMetrics=[outVideo,inVideo,quality].filter(Boolean).join(' | ');
     updateDebug();
   },1000);
 }
-function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=null}lastSent=0;lastRecv=0;$('netStats').textContent='⬆ -- ⬇ -- KB/s'}
+function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=null}lastSent=0;lastRecv=0;avMetrics='';$('netStats').textContent='⬆ -- ⬇ -- KB/s'}
 
 function updateDebug(){
   const info=$('aDbg');
@@ -276,7 +370,8 @@ function updateDebug(){
   info.textContent='AV:'+(connected?'✅':'⏳')+
     ' | PC:'+(pc?pc.connectionState:'null')+
     ' | ICE:'+(pc?pc.iceConnectionState:'-')+
-    ' | SIG:'+(pc?pc.signalingState:'-');
+    ' | SIG:'+(pc?pc.signalingState:'-')+
+    (avMetrics?' | '+avMetrics:'');
 }
 
 let micOn=true, camOn=true;

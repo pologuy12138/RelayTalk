@@ -26,5 +26,13 @@ services:
       TURN_USERNAME: "replace-me"
       TURN_CREDENTIAL: "replace-me"
       ICE_TRANSPORT_POLICY: "relay"
+      VIDEO_WIDTH: "1280"
+      VIDEO_HEIGHT: "720"
+      VIDEO_FPS: "18"
+      VIDEO_MAX_BITRATE: "3000000"
+      VIDEO_START_BITRATE: "1800000"
+      VIDEO_MIN_BITRATE: "800000"
+      VIDEO_DEGRADATION: "maintain-resolution"
+      VIDEO_PREFER_CODEC: "H264"
     ports:
       - "3050:3050"             # HTTP（内网用，或自行套 HTTPS 反代）
