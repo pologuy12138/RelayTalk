@@ -64,6 +64,7 @@ let mediaPromise=null, pendingCandidates=[];
 let makingOffer=false, connected=false;
 let statsTimer=null, lastSent=0, lastRecv=0, appConfig=null, ICE_CONFIG=null;
 let avMetrics='';
+let lastVideoFrames={out:null,in:null};
 const DEFAULT_VIDEO={width:1280,height:720,frameRate:18,maxBitrate:3000000,startBitrate:1800000,minBitrate:800000,degradationPreference:'maintain-resolution',preferCodec:'H264'};
 const DEFAULT_AUDIO={maxBitrate:64000};
 
@@ -92,7 +93,7 @@ async function ensureMedia(){
     try{
       const vc=videoConfig();
       localStream=await navigator.mediaDevices.getUserMedia({
-        video:{width:{ideal:vc.width},height:{ideal:vc.height},frameRate:{ideal:vc.frameRate,max:vc.frameRate}},
+        video:{width:{ideal:vc.width},height:{ideal:vc.height},frameRate:{ideal:vc.frameRate}},
         audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
       });
       for(const track of localStream.getVideoTracks()){
@@ -342,27 +343,43 @@ function startStats(){
     if(!pc) return;
     const stats=await pc.getStats();
     let sent=0, recv=0;
-    let outVideo='', inVideo='', quality='';
+    let outVideo='', inVideo='', sourceVideo='', quality='';
+    const vTrack=localStream&&localStream.getVideoTracks()[0];
+    if(vTrack&&vTrack.getSettings){
+      const s=vTrack.getSettings();
+      if(s.width&&s.height) sourceVideo=`CAM:${s.width}x${s.height}${s.frameRate?`@${Math.round(s.frameRate)}`:''}`;
+    }
     stats.forEach(r=>{
       if(r.type==='outbound-rtp' && !r.isRemote) sent+=r.bytesSent||0;
       if(r.type==='inbound-rtp' && !r.isRemote) recv+=r.bytesReceived||0;
       if(r.type==='outbound-rtp' && !r.isRemote && (r.kind==='video'||r.mediaType==='video')){
-        const w=r.frameWidth||0, h=r.frameHeight||0, fps=Math.round(r.framesPerSecond||0);
+        const w=r.frameWidth||0, h=r.frameHeight||0;
+        const fps=calcVideoFps('out',r.id,r.framesEncoded||r.framesSent||0,r.timestamp,r.framesPerSecond);
         if(w&&h) outVideo=`TX:${w}x${h}${fps?`@${fps}`:''}`;
         if(r.qualityLimitationReason) quality=`Q:${r.qualityLimitationReason}`;
       }
       if(r.type==='inbound-rtp' && !r.isRemote && (r.kind==='video'||r.mediaType==='video')){
-        const w=r.frameWidth||0, h=r.frameHeight||0, fps=Math.round(r.framesPerSecond||0);
+        const w=r.frameWidth||0, h=r.frameHeight||0;
+        const fps=calcVideoFps('in',r.id,r.framesDecoded||r.framesReceived||0,r.timestamp,r.framesPerSecond);
         if(w&&h) inVideo=`RX:${w}x${h}${fps?`@${fps}`:''}`;
       }
     });
     $('netStats').textContent=`⬆ ${((sent-lastSent)/1024).toFixed(1)} ⬇ ${((recv-lastRecv)/1024).toFixed(1)} KB/s`;
     lastSent=sent; lastRecv=recv;
-    avMetrics=[outVideo,inVideo,quality].filter(Boolean).join(' | ');
+    avMetrics=[sourceVideo,outVideo,inVideo,quality].filter(Boolean).join(' | ');
     updateDebug();
   },1000);
 }
-function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=null}lastSent=0;lastRecv=0;avMetrics='';$('netStats').textContent='⬆ -- ⬇ -- KB/s'}
+function calcVideoFps(kind,id,frames,timestamp,fallback){
+  const prev=lastVideoFrames[kind];
+  let fps=Number(fallback||0);
+  if(prev&&prev.id===id&&timestamp>prev.timestamp&&frames>=prev.frames){
+    fps=(frames-prev.frames)*1000/(timestamp-prev.timestamp);
+  }
+  lastVideoFrames[kind]={id,frames,timestamp};
+  return fps>0?Math.round(fps):0;
+}
+function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=null}lastSent=0;lastRecv=0;lastVideoFrames={out:null,in:null};avMetrics='';$('netStats').textContent='⬆ -- ⬇ -- KB/s'}
 
 function updateDebug(){
   const info=$('aDbg');
